@@ -7,6 +7,7 @@ export interface Event<T = any> {
   data: T;
   operation: "INSERT" | "UPDATE" | "DELETE";
   entityId: string;
+  isLast?: boolean;
 }
 
 export interface Cursor {

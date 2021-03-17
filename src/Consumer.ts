@@ -13,10 +13,12 @@ import {
 import debug from "debug";
 
 export class Consumer {
+  public upToDate$: Subject<void>;
   protected stream$: Subject<Event>;
   protected debugger: debug.Debugger;
   protected removeAfterApply: boolean;
   protected id: string;
+  protected lastEventId: string;
   protected live: boolean;
   protected ref: Reference;
   protected cursor: Cursor = {
@@ -30,30 +32,13 @@ export class Consumer {
     this.id = options.id;
     this.live = options.live ?? true;
     this.stream$ = new Subject();
+    this.upToDate$ = new Subject();
     this.debugger = debug(
       `firebase-streams:consumer[${this.id}][${this.ref.ref}]`
     );
   }
 
-  stream(pipe: ($: Observable<Event>) => Observable<Event | null>) {
-    const storedEvents$: () => Observable<Event> = () =>
-      from(this.cursorRef().once("value")).pipe(
-        concatMap((snap) => {
-          const events: Event[] = Object.entries(snap.val() || {}).map(
-            ([id, event]: [string, Omit<Event, "id">]) => ({
-              id,
-              ...event,
-            })
-          );
-
-          if (events.length) {
-            return from(events);
-          } else {
-            return of(null);
-          }
-        })
-      );
-
+  stream(pipe: ($: Observable<Event>) => Observable<Event[]>) {
     const newEvents$: () => Observable<Event> = () =>
       fromEvent<DataSnapshot>(this.cursorRef(), "child_added").pipe(
         map((snap) => {
@@ -65,37 +50,34 @@ export class Consumer {
         })
       );
 
-    return this.loadCursor().pipe(
-      tap(() => this.debugger("start", { cursor: this.cursor })),
+    return from(this.getLastEventId()).pipe(
       switchMap(() =>
-        concat(storedEvents$(), this.live ? newEvents$() : of(null))
-      ),
-      filter((event) => !!event && event.id !== this.cursor.eventId),
-      concatMap((event) =>
-        of(event).pipe(
+        this.loadCursor().pipe(
+          tap(() => this.debugger("start", { cursor: this.cursor })),
+          switchMap(() => concat(newEvents$())),
+          filter((event) => !!event && event.id !== this.cursor.eventId),
           tap((event) => this.debugger("event", event)),
           pipe,
-          switchMap(async (event) => {
-            if (event) {
-              await this.setCursor(event);
-              if (this.removeAfterApply) {
-                await this.removeEvent(event);
-              }
-              return event;
-            } else {
-              this.debugger("missing event in pipe, closing...");
-            }
+          switchMap((events) => this.ack(events)),
+          catchError(async (err) => {
+            await this.setError(err);
+            throw err;
+          }),
+          finalize(() => {
+            this.debugger("close");
+            this.cursorRef().off();
           })
         )
-      ),
-      catchError(async (err) => {
-        await this.setError(err);
-        throw err;
-      }),
-      finalize(() => {
-        this.debugger("close");
-        this.cursorRef().off();
-      })
+      )
+    );
+  }
+
+  getLastEventId() {
+    return from(
+      this.ref
+        .child("lastEvent")
+        .once("value")
+        .then((snap) => (this.lastEventId = snap.val()))
     );
   }
 
@@ -113,6 +95,23 @@ export class Consumer {
           return this.cursor;
         })
     );
+  }
+
+  async ack(events: Event[]) {
+    if (events.length) {
+      const event = events[events.length - 1];
+      await this.setCursor(event);
+      if (this.removeAfterApply) {
+        await this.removeEvent(event);
+      }
+      if (events.some((e) => e.id === this.lastEventId)) {
+        this.upToDate$.next();
+        this.upToDate$.complete();
+      }
+      return event;
+    } else {
+      this.debugger("missing event in pipe, closing...");
+    }
   }
 
   protected removeEvent(event: Event) {
@@ -141,7 +140,7 @@ export class Consumer {
     if (this.cursor.eventId) {
       return this.ref.child("events").orderByKey().startAt(this.cursor.eventId);
     } else {
-      return this.ref.child("events").orderByKey();
+      return this.ref.child("events");
     }
   }
 }
