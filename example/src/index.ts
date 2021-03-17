@@ -24,15 +24,15 @@ admin.initializeApp({
 
 new Consumer({
   id: "tester-1",
+  removeAfterApply: false,
+  live: true,
   ref: admin
     .database()
-    .ref("organizations/a5064b55-30df-4684-befc-24f6eb6f3895"),
-  removeAfterApply: false,
-  live: false,
+    .ref("organizations/39d089f5-64a0-4bf7-8135-609ad3a57047"),
 })
   .stream(($) => $.pipe(tap(console.log)))
   .subscribe(
-    (event) => {},
+    (event) => console.log("next", event.id),
     (error) => console.log("error", error),
     () => console.log("consumer close")
   );
